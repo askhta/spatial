@@ -1,0 +1,556 @@
+---
+title: "Final Report"
+subtitle: "Standardized Precipitation-Evapotranspiration Index (SPEI)"
+author: "*by* **Group 9**"
+date: "`r Sys.Date()`"
+output: 
+  rmdformats::readthedown:
+    code_download: TRUE
+    code_folding: show
+    number_sections: TRUE
+    dev: "svg"
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.dim = c(8, 6), fig.align = "center", out.width = "100%")
+```
+
+```{r klippy, echo=FALSE, include=TRUE}
+klippy::klippy(c('r', 'python', 'json', 'linux'), position = c('top', 'right'),
+               tooltip_message = 'Click to copy', tooltip_success = 'Copied')
+```
+
+# Introduction
+SPEI 
+
+What it is: (Standardized Precipitation Evapotranspiration Index) (a.k.a drought index)
+
+So it reflects that drought risk depends not only on rainfall but also on temperature/evaporation effects.
+
+- Precipitation (P) = water coming in
+
+- Atmospheric evaporative demand / potential evapotranspiration (PET) = water that the atmosphere would pull out (driven mainly by temperature, radiation, wind, humidity)
+
+###
+The core idea is a water-balance anomaly:
+D=P−PET
+
+
+Then that D series is:
+- Accumulated over a time scale (e.g., 6 months for SPEI-6),
+- Fit to a distribution and standardized so the final index behaves like a z-score.
+
+
+###
+So SPEI values mean:
+SPEI = 0: normal
+SPEI < 0: drier than normal (drought tendency)
+SPEI > 0: wetter than normal
+
+Common thresholds:
+
+around −0.5: mildly/moderately dry (more events, good for statistics)
+
+−1.0: moderate drought
+−1.5: severe drought
+−2.0: extreme drought
+
+###
+SPEI also comes at multiple time scales (SPEI-3, SPEI-6, etc.). We use 6
+SPEI-6 uses the last 6 months of P−PET aggregated together.
+That makes it good for seasonal / hydrological drought (not just a single dry month).
+
+
+
+## what we are doing:
+### 
+Mekong SPEI-6 -> Drought events -> Joint Risk (D,S)
+We analyze the Mekong area for now. 
+
+We compute the basin-mean SPEI time series (one value per month) by averaging all Mekong grid cells.
+
+
+We are analyzing drought risk using rainfall-driven information, often focusing on how multiple drought characteristics happen together (e.g., long and severe drought), and quantifying that as joint probability / joint return period.
+
+###
+We use the SPEIbase (SPEI database) to extract drought events, then model the joint risk of Duration and Severity.
+
+SPEIbase
+A gridded time series of SPEI-6 values.
+Each cell (pixel) has one value per month.
+The values are unitless (a standardized index, like a z-score).
+
+SPEI is computed from climate variables:
+precipitation (mm)
+temperature / PET (mm equivalent water)
+but SPEIbase  provides the final index only,
+
+
+How we extract drought events?
+SPEI is a continuous index over time. To do drought risk, we convert it into drought events using run theory (threshold method):
+
+if SPEI≤−0.5 => drought month
+if there are some consecutive months below the threshold => 1 drought event lasting for how long
+
+From each drought event you compute:
+
+1) Duration 
+D
+Number of consecutive drought months.
+
+
+2) Severity 
+S
+Total “deficit” below the threshold across the event.
+
+
+S=∑max⁡(0 threshold−SPEIt)
+
+
+So if threshold is −0.5:
+
+SPEI = −0.7 → deficit = (−0.5 − (−0.7)) = 0.2
+SPEI = −1.1 → deficit = 0.6
+Severity adds them up across all months in the event.
+
+Interpretation:
+Long events => high D
+
+Deep/strong drought months => high deficits => high S
+
+###
+Joint pair (how long + how severe)
+
+Joint risk::: What is the probability (and return period) of droughts that are BOTH long and severe?
+
+
+### 
+The Model 
+Copula:
+
+Our analysis has 2 layers:
+
+Layer A - Marginals
+
+Model the distribution of each variable separately:
+
+D (duration): Poisson or Negative Binomial
+S (severity): Gamma or Lognormal
+
+This tells :
+how likely long durations are
+how likely large severities are
+
+
+Layer B - Dependence (Copula)
+
+A copula models how D and S are linked.
+
+Because:
+longer droughts tend to be more severe, but not perfectly tail dependence can matter (extremes co-occur)
+
+So we:
+Transform D and S to uniforms U,V via PIT,
+Fit a copula family (Gaussian/Clayton/Gumbel/Frank or auto-select),
+Use it to compute joint probabilities.
+
+
+
+## Plan: (to be updated)
+
+**maybe upscale from Mekong to SEA?**
+
+Mekong map + SPEI-6 maps: one map check done; 
+**modify the plot check to map the surrounding areas as well**
+ **add dry vs wet month maps.**
+
+Basin-mean SPEI-6 time series: done with threshold line at −0.5.
+
+Marginals (D,S): AIC table + hist/bar + fitted overlay done; 
+**ECDF not included yet.**
+
+Copula comparison: manual AIC/BIC/tau + BiCopSelect comparison done.
+
+Joint return period: single scenario done; 
+**add grid/contour/curve.**
+
+**Sensitivity discussion**
+**add loops for thresholds and/or SPEI-3/12.**
+
+(and more)
+
+# Packages
+```{r}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  terra, dplyr, purrr, tidyr, lubridate, ggplot2,
+  fitdistrplus, VineCopula
+)
+
+```
+
+
+# 1 Load Mekong basin boundary
+
+```{r}
+basins <- terra::vect(
+  "hydrobasins_l6/hydrobasins_l6/hydrobasin_L6_SE-ASIA.shp"
+)
+basins
+names(basins)
+```
+
+```{r}
+
+names(basins)
+head(as.data.frame(basins), 3)
+```
+# 2 Identify Mekong polygon(s)
+```{r}
+
+sort(unique(basins$MAJ_NAME))
+```
+
+
+```{r}
+mek <- basins[basins$MAJ_NAME == "Mekong", ]
+mek
+
+#  Dissolve to a single Mekong polygon 
+mek_union <- aggregate(mek)
+mek_union
+
+# Read SPEI , mask to Mekong
+spei <- rast("spei06.nc")
+
+spei_mek <- mask(crop(spei, mek_union), mek_union)
+spei_mek
+
+```
+
+
+```{r}
+# plot check
+plot(spei_mek[[1]])
+plot(mek_union, add = TRUE, border = "black", lwd = 2)
+```
+
+
+# 4 Basin-mean SPEI time series
+
+```{r}
+#  can also do grid-cell-wise events; basin mean is easiest for a first pass.
+
+spei_mean <- terra::global(spei_mek, fun = "mean", na.rm = TRUE)
+
+
+t_vec <- terra::time(spei_mek)  
+df_ts <- tibble(
+  date = as.Date(t_vec),
+  spei = as.numeric(spei_mean[, 1])
+) %>%
+  filter(!is.na(spei))
+
+
+```
+
+# Time-series plot + drought threshold
+```{r}
+ggplot(df_ts, aes(date, spei)) +
+  geom_line(linewidth = 0.4) +
+  geom_hline(yintercept = -0.5, linetype = "dashed") +
+  labs(
+    title = "Basin-mean SPEI-6 (Mekong)",
+    subtitle = "Drought threshold at SPEI = -0.5",
+    x = NULL, y = "SPEI-6"
+  ) +
+  theme_minimal()
+```
+
+
+
+# 5) Run theory: extract drought events and compute Duration & Severity
+
+severity as the sum of deficits only when x<thresh so severity can be positive
+
+We define drought months as SPEI ≤ −0.5 and extract events using run theory; severity is accumulated deficit below the threshold.
+
+```{r}
+# Convention: drought when SPEI <= -0.5 ( -1 is common but too few events (only 13 so changed to -0.5)), severity = sum(|SPEI - threshold|) over event
+
+# (Negative SPEI indicates dry; <= -1 is often used as moderate drought threshold.) 
+
+extract_events <- function(date, x, thresh = -1) {
+  in_d <- x <= thresh
+  r <- rle(in_d)
+  ends <- cumsum(r$lengths)
+  starts <- ends - r$lengths + 1
+
+  tibble(
+    in_drought = r$values,
+    start_idx = starts,
+    end_idx = ends,
+    duration = r$lengths
+  ) %>%
+    filter(in_drought) %>%
+    mutate(
+      start_date = date[start_idx],
+      end_date   = date[end_idx],
+      severity   = purrr::map2_dbl(start_idx, end_idx, \(a, b) {
+        seg <- x[a:b]
+        seg <- seg[!is.na(seg)]
+        # deficit is positive: (thresh - seg) but only where seg <= thresh
+        sum(pmax(0, thresh - seg))
+      }),
+      intensity = severity / duration
+    )
+}
+
+events  <- extract_events(df_ts$date, df_ts$spei, thresh = -0.5)
+events2 <- events %>% dplyr::filter(duration >= 2, severity > 0)
+
+# event count
+nrow(events2)
+
+
+```
+
+
+```{r}
+# check b4 fitting
+summary(events2$duration)
+summary(events2$severity)
+
+anyNA(events2$duration); anyNA(events2$severity)
+min(events2$duration, na.rm = TRUE)
+min(events2$severity, na.rm = TRUE)
+
+table(events2$duration)
+```
+
+
+# 6) Fit marginals for D and S (compare a few; pick via AIC) 
+
+
+```{r}
+D <- events2$duration
+S <- events2$severity
+
+# Duration: Poisson & NegBin (NB often better for overdispersion)
+fit_D_pois <- fitdistrplus::fitdist(D, "pois")
+fit_D_nb   <- fitdistrplus::fitdist(D, "nbinom")
+
+# Severity: Gamma & Lognormal (both positive continuous)
+fit_S_gam   <- fitdistrplus::fitdist(S, "gamma")
+fit_S_lnorm <- fitdistrplus::fitdist(S, "lnorm")
+
+# AIC comparison (stable)
+AIC_D <- c(pois = AIC(fit_D_pois), nbinom = AIC(fit_D_nb))
+AIC_S <- c(gamma = AIC(fit_S_gam), lnorm  = AIC(fit_S_lnorm))
+
+AIC_D
+AIC_S
+```
+
+```{r}
+
+set.seed(123)
+
+# Choose which fits you use:
+fitD <- fit_D_nb     # or fit_D_pois
+fitS <- fit_S_gam    # or fit_S_lnorm
+
+# Randomized PIT for D (discrete)
+if (fitD$distname == "nbinom") {
+  Fd  <- pnbinom(D, size = fitD$estimate[["size"]], mu = fitD$estimate[["mu"]])
+  Fd1 <- pnbinom(D - 1, size = fitD$estimate[["size"]], mu = fitD$estimate[["mu"]])
+} else {
+  Fd  <- ppois(D, lambda = fitD$estimate[["lambda"]])
+  Fd1 <- ppois(D - 1, lambda = fitD$estimate[["lambda"]])
+}
+U <- Fd1 + runif(length(D)) * (Fd - Fd1)
+
+# PIT for S (continuous)
+if (fitS$distname == "gamma") {
+  V <- pgamma(S, shape = fitS$estimate[["shape"]], rate = fitS$estimate[["rate"]])
+} else {
+  V <- plnorm(S, meanlog = fitS$estimate[["meanlog"]], sdlog = fitS$estimate[["sdlog"]])
+}
+
+eps <- 1e-6
+U <- pmin(pmax(U, eps), 1 - eps)
+V <- pmin(pmax(V, eps), 1 - eps)
+
+copula_df <- tibble::tibble(U = U, V = V)
+```
+
+
+# Add dependence metrics
+
+```{r}
+cat("\nDependence (D,S)\n")
+cat("Spearman:", round(cor(D, S, method = "spearman"), 3), "\n")
+cat("Kendall :", round(cor(D, S, method = "kendall"), 3), "\n")
+
+```
+
+
+
+# Auto copula selection 
+Compare this professional selection table with manual selection AIC table later
+aic_tbl below tells which family has the lowest AIC among {Gaussian, Clayton, Gumbel, Frank}
+
+plus BIC and Kendall’s tau
+```{r}
+# Compare this professional selection table with manual selection AIC table later
+
+sel <- VineCopula::BiCopSelect(U, V, familyset = NA)
+sel
+VineCopula::BiCopName(sel$family)
+```
+
+# marginal plots for D and S + fitted curves
+
+
+(If choose lognormal for S, swap dgamma to dlnorm)
+
+
+
+
+## Density contour
+```{r}
+ggplot(copula_df, aes(U, V)) +
+  geom_density_2d(color = "black") +
+  geom_point(alpha = 0.15) +
+  labs(title = "Copula-space dependence (contours)") +
+  theme_minimal() +
+  theme(aspect.ratio = 1)
+
+```
+
+
+# marginal plots for D and S + fitted curves
+```{r}
+# Histograms + fitted densities (Severity)
+pS <- ggplot(tibble(S = S), aes(S)) +
+  geom_histogram(aes(y = ..density..), bins = 20, alpha = 0.6) +
+  { if (fitS$distname == "gamma")
+      stat_function(fun = dgamma, args = as.list(fitS$estimate), linewidth = 1)
+    else
+      stat_function(fun = dlnorm, args = as.list(fitS$estimate), linewidth = 1)
+  } +
+  labs(title = paste("Severity marginal (", fitS$distname, " overlay)", sep="")) +
+  theme_minimal()
+
+
+# For duration (discrete), show bar plot
+pD <- ggplot(tibble(D = D), aes(factor(D))) +
+  geom_bar(alpha = 0.7) +
+  labs(title = "Duration marginal", x = "Duration (months)", y = "Count") +
+  theme_minimal()
+
+pD
+pS
+
+```
+
+# 7) Fit copulas (compare families; select by AIC) 
+
+```{r}
+
+uv <- cbind(U, V)
+
+fit_gauss <- VineCopula::BiCopEst(uv[,1], uv[,2], family = 1)   # Gaussian
+fit_clay  <- VineCopula::BiCopEst(uv[,1], uv[,2], family = 3)   # Clayton
+fit_gumb  <- VineCopula::BiCopEst(uv[,1], uv[,2], family = 4)   # Gumbel
+fit_frank <- VineCopula::BiCopEst(uv[,1], uv[,2], family = 5)   # Frank
+
+fits <- list(Gaussian = fit_gauss, Clayton = fit_clay, Gumbel = fit_gumb, Frank = fit_frank)
+aic_tbl <- tibble(
+  model = names(fits),
+  AIC = sapply(fits, \(m) m$AIC),
+  BIC = sapply(fits, \(m) m$BIC),
+  tau = sapply(fits, \(m) m$tau)
+) %>% arrange(AIC)
+
+aic_tbl
+
+best <- fits[[aic_tbl$model[1]]]
+VineCopula::BiCopName(best$family)
+
+```
+
+## compare manual vs BiCopSelect tables
+
+```{r}
+sel_row <- tibble(
+  model = "BiCopSelect",
+  AIC = sel$AIC,
+  BIC = sel$BIC,
+  tau = sel$tau
+)
+
+bind_rows(aic_tbl, sel_row) %>% arrange(AIC)
+
+```
+
+If BiCopSelect picks the same family as my best (top of aic_tbl):
+“Both approaches agree → strong confidence in copula choice.”
+
+If they differ:
+“Manual comparison was limited to 4 families; BiCopSelect searched a wider set and selected a different copula, suggesting tail dependence/asymmetry may be better captured by that family.”
+
+# 8) Joint return period
+
+```{r}
+
+# Two common joint events:
+# (i) AND-event: D >= d0 AND S >= s0
+# (ii) OR-event : D >= d0 OR  S >= s0
+#
+# Use fitted marginals to map thresholds to u0,v0, then use copula C(u,v).
+# For AND: P(D>=d0, S>=s0) = 1 - u0 - v0 + C(u0,v0)
+# where u0 = P(D <= d0-1) (discrete) and v0 = P(S <= s0)
+# Return period T ≈ 1 / P(event) in "event units" (here: per month if defined monthly).
+
+
+#  can also report "expected waiting time in years" by dividing by 12.
+
+joint_return_period_AND <- function(d0, s0, cop, fitD, fitS) {
+
+  # u0 = P(D <= d0-1)
+  if (fitD$distname == "nbinom") {
+    u0 <- pnbinom(d0 - 1, size = fitD$estimate[["size"]], mu = fitD$estimate[["mu"]])
+  } else {
+    u0 <- ppois(d0 - 1, lambda = fitD$estimate[["lambda"]])
+  }
+
+  # v0 = P(S <= s0)
+  if (fitS$distname == "gamma") {
+    v0 <- pgamma(s0, shape = fitS$estimate[["shape"]], rate = fitS$estimate[["rate"]])
+  } else {
+    v0 <- plnorm(s0, meanlog = fitS$estimate[["meanlog"]], sdlog = fitS$estimate[["sdlog"]])
+  }
+
+  u0 <- pmin(pmax(u0, 1e-6), 1 - 1e-6)
+  v0 <- pmin(pmax(v0, 1e-6), 1 - 1e-6)
+
+  Cuv <- VineCopula::BiCopCDF(u0, v0, cop)
+  p_and <- 1 - u0 - v0 + Cuv
+
+  T_months <- 1 / p_and
+  T_years <- T_months / 12
+
+  c(p_and = p_and, T_months = T_months, T_years = T_years)
+}
+
+# Example: "duration >= 6 months AND severity >= 4"
+joint_return_period_AND(d0 = 6, s0 = 4, cop = best, fitD = fitD, fitS = fitS)
+```
+
+------------------------------------------------------------------------
+
+# EOF
