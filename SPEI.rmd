@@ -197,7 +197,7 @@ pacman::p_load(
 
 ```{r}
 basins <- terra::vect(
-  "hydrobasins_l6/hydrobasins_l6/hydrobasin_L6_SE-ASIA.shp"
+  "hydrobasins_l6/hydrobasin_L6_SE-ASIA.shp"
 )
 basins
 names(basins)
@@ -238,6 +238,40 @@ plot(spei_mek[[1]])
 plot(mek_union, add = TRUE, border = "black", lwd = 2)
 ```
 
+```{r}
+# choose a month (e.g. 2005-08)
+sel_date <- as.Date("2005-08-16")
+idx <- which(terra::time(spei_mek) == sel_date)
+
+spei_one <- spei_mek[[idx]]
+
+# classify dry / normal / wet
+drywet <- classify(
+  spei_one,
+  rcl = matrix(c(-Inf, -0.5, -1,
+                 -0.5,  0.5,  0,
+                  0.5,  Inf,  1),
+               ncol = 3, byrow = TRUE)
+)
+
+levels(drywet) <- data.frame(
+  ID = c(-1, 0, 1),
+  class = c("Dry", "Normal", "Wet")
+)
+
+plot(drywet, col = c("red", "grey80", "blue"),
+     main = "Dry vs Wet months (SPEI-6)")
+plot(mek_union, add = TRUE, border = "black", lwd = 2)
+```
+
+```{r}
+dry_mask <- spei_mek <= -1
+
+dry_freq <- terra::mean(dry_mask, na.rm = TRUE)
+
+plot(dry_freq, main = "Fraction of dry months (SPEI ≤ -1)")
+plot(mek_union, add = TRUE, border = "black", lwd = 2)
+```
 
 # 4 Basin-mean SPEI time series
 
@@ -386,7 +420,38 @@ V <- pmin(pmax(V, eps), 1 - eps)
 
 copula_df <- tibble::tibble(U = U, V = V)
 ```
+###Discrete
+```{r}
+library(ggplot2)
 
+ggplot(tibble(D = D), aes(D)) +
+  stat_ecdf(geom = "step") +
+  labs(title = "ECDF of Drought Duration",
+       x = "Duration (months)", y = "F(D)") +
+  theme_minimal()
+```
+
+###Continuous
+```{r}
+# empirical ECDF
+p_ecdf_S <- ggplot(tibble(S = S), aes(S)) +
+  stat_ecdf(geom = "step", linewidth = 1) +
+  labs(title = "ECDF of Drought Severity",
+       x = "Severity", y = "F(S)") +
+  theme_minimal()
+
+# fitted CDF overlay
+p_ecdf_S +
+  { if (fitS$distname == "gamma")
+      stat_function(fun = pgamma,
+                    args = as.list(fitS$estimate),
+                    linetype = "dashed", linewidth = 1)
+    else
+      stat_function(fun = plnorm,
+                    args = as.list(fitS$estimate),
+                    linetype = "dashed", linewidth = 1)
+  }
+```
 
 # Add dependence metrics
 
